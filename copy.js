@@ -66,27 +66,63 @@ const LogLevels = {
 const Logger = {
     currentLevel: LogLevels[LOG_LEVEL.toUpperCase()] || LogLevels.INFO,
 
-    debug: function(message) {
+    _log: function(level, ...args) { // Acepta múltiples argumentos
+        // Helper para obtener el timestamp en formato YYYY-MM-DD HH:MM:SS.mmm
+        const getFormattedTimestamp = () => {
+            const d = new Date();
+            const pad = (num, size = 2) => num.toString().padStart(size, '0');
+            return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}.${pad(d.getMilliseconds(), 3)}`;
+        };
+
+        // Construir el mensaje a partir de los argumentos
+        // Si un argumento es un objeto Error, se usa su stack.
+        const messageParts = args.map(arg => {
+            if (arg instanceof Error) {
+                return arg.stack; // Usar el stacktrace completo
+            }
+            // Para otros objetos, podríamos usar JSON.stringify o similar si es necesario.
+            if (typeof arg === 'object' && arg !== null) {
+                try {
+                    // Intentar convertir a JSON, útil para objetos simples
+                    return JSON.stringify(arg);
+                } catch (e) {
+                    // Si falla JSON.stringify (ej. objetos circulares), usar toString()
+                    return arg.toString();
+                }
+            }
+            return arg; // Para strings, números, etc.
+        });
+        const message = messageParts.join(' ');
+
+        // Seleccionar la función de consola adecuada según el nivel
+        const logFunction = level === 'ERROR' ? console.error :
+                            level === 'WARN' ? console.warn :
+                            console.log;
+
+        logFunction(`${getFormattedTimestamp()} [${level}] ${message}`);
+    },
+
+    debug: function(...args) { // Aceptar múltiples argumentos
         if (this.currentLevel <= LogLevels.DEBUG) {
-            console.log(`[DEBUG] ${message}`);
+            this._log('DEBUG', ...args);
         }
     },
 
-    info: function(message) {
+    info: function(...args) { // Aceptar múltiples argumentos
         if (this.currentLevel <= LogLevels.INFO) {
-            console.log(`[INFO] ${message}`);
+            this._log('INFO', ...args);
         }
     },
 
-    warn: function(message) {
+    warn: function(...args) { // Aceptar múltiples argumentos
         if (this.currentLevel <= LogLevels.WARN) {
-            console.warn(`[WARN] ${message}`);
+            this._log('WARN', ...args);
         }
     },
 
-    error: function(message) {
+    error: function(...args) { // Aceptar múltiples argumentos
         if (this.currentLevel <= LogLevels.ERROR) {
-            console.error(`[ERROR] ${message}`);
+            this._log('ERROR', ...args);
         }
     }
 };
@@ -125,16 +161,35 @@ const decomposeDate = (date) => {
 };
 
 /**
- * Genera un nombre de archivo basado en una fecha y un tipo
+ * Genera un nombre de archivo basado en una fecha y un tipo, agrupado por hora.
  * @param {string} type - Tipo de datos (usado como prefijo en el nombre del archivo)
- * @param {Date} date - Fecha a utilizar para el nombre del archivo
- * @returns {string} Ruta completa del archivo incluyendo carpetas organizadas por fecha
+ * @param {Date} date - Fecha a utilizar para el nombre del archivo. Los minutos, segundos y ms se usarán para el UUID si es necesario, pero la carpeta es horaria.
+ * @param {boolean} isHourlyFile - Indica si el archivo representa toda la hora (minutos y segundos serán 00).
+ * @returns {string} Ruta completa del archivo incluyendo carpetas organizadas por fecha y hora.
  */
-const getTimestampFilename = (type, date) => {
+const getTimestampFilename = (type, date, isHourlyFile = false) => {
     // Descomponer la fecha y hora en sus componentes
-    const { year, month, day, hours, minutes, seconds, milliseconds } = decomposeDate(date);
+    const { year, month, day, hours } = decomposeDate(date);
+    let minutes = date.getMinutes();
+    let seconds = date.getSeconds();
+    let milliseconds = date.getMilliseconds();
+
+    if (isHourlyFile) {
+        minutes = 0;
+        seconds = 0;
+        // Los milisegundos pueden dejarse o ponerse a 0, el UUID ya da unicidad.
+        // Para un nombre "limpio" de hora, podríamos omitirlos o ponerlos a 0.
+        // Por ahora, los mantenemos del primer registro si es un lote parcial, o 000 si es el archivo de la hora.
+        milliseconds = 0; // Para un nombre de archivo representativo de la hora.
+    }
+
+    const pad = (num, size = 2) => num.toString().padStart(size, '0');
+
     // Crear el nombre del archivo con la fecha y hora
-    return `${year}/${month}/${day}/${hours}/${type}_${year}${month}${day}_${hours}${minutes}_${seconds}_${milliseconds}_${uuidv4()}.json.gz`;
+    // La estructura de carpetas es YYYY/MM/DD/HH
+    // El nombre del archivo es type_YYYYMMDD_HHMM_SS_mmm_uuid.json.gz
+    // Si isHourlyFile es true, MM y SS serán 00.
+    return `${year}/${month}/${day}/${pad(hours)}/${type}_${year}${month}${day}_${pad(hours)}${pad(minutes)}_${pad(seconds)}_${pad(milliseconds, 3)}_${uuidv4()}.json.gz`;
 };
 
 /**
@@ -164,7 +219,7 @@ const connectToMySQL = () => {
         Logger.info('Conexión a MySQL establecida correctamente');
         return connection;
     } catch (error) {
-        Logger.error(`Error al conectar a MySQL: ${error}`);
+        Logger.error('Error al conectar a MySQL:', error); // Modificado para pasar el objeto error
         throw error;
     }
 };
@@ -200,28 +255,24 @@ const processRecord = (record, type) => {
  * @param {Array} records - Registros a procesar
  * @param {string} type - Tipo de datos (usado como prefijo en el nombre del archivo)
  * @param {boolean} saveLocally - Indica si se debe guardar localmente o en S3
- * @param {string} minuteKey - Clave del minuto para agrupar registros (opcional)
+ * @param {string} hourKey - Clave de la hora para agrupar registros (opcional, formato YYYY-MM-DD-HH)
  * @returns {Promise<Object>} Información sobre el lote procesado
  */
-const processBatch = async (records, type, saveLocally, minuteKey = null) => {
+const processBatch = async (records, type, saveLocally, hourKey = null) => {
     if (records.length === 0) return null;
 
     // Obtener la fecha del primer registro para el nombre del archivo
     const firstRecord = records[0];
-    const firstDate = new Date(firstRecord.created_at);
+    // Usamos la fecha del primer registro si no hay hourKey, o la hourKey para la base del nombre del archivo.
+    const baseDate = hourKey
+        ? new Date(parseInt(hourKey.split('-')[0]), parseInt(hourKey.split('-')[1]) - 1, parseInt(hourKey.split('-')[2]), parseInt(hourKey.split('-')[3]))
+        : new Date(firstRecord.created_at);
 
-    // Generar el nombre del archivo basado en el intervalo de 10 minutos
-    // Si se proporciona minuteKey, usarla para generar un nombre consistente para el mismo intervalo de 10 minutos
-    let fileName;
-    if (minuteKey) {
-        // Extraer componentes de la clave del minuto (año-mes-día-hora-minuto)
-        const [year, month, day, hour, minute] = minuteKey.split('-');
-        // Crear una fecha con estos componentes
-        const minuteDate = new Date(year, month - 1, day, hour, minute);
-        fileName = `${type}/${getTimestampFilename(type, minuteDate)}`;
-    } else {
-        fileName = `${type}/${getTimestampFilename(type, firstDate)}`;
-    }
+    // Generar el nombre del archivo.
+    // Si se proporciona hourKey, significa que este archivo es para toda esa hora.
+    // Si no, es un lote (batchSize > 0) y el nombre del archivo se basa en el primer registro.
+    const isHourlyFile = !!hourKey;
+    const fileName = `${type}/${getTimestampFilename(type, baseDate, isHourlyFile)}`;
 
     // Añadir el campo s3file a todos los registros con la ruta completa
     const fullPath = `${BUCKET_NAME}/${fileName}`;
@@ -234,7 +285,7 @@ const processBatch = async (records, type, saveLocally, minuteKey = null) => {
 
     // Comprimir el contenido
     const compressedContent = zlib.gzipSync(jsonContent, { level: 9 });
-    Logger.info(`Contenido comprimido, tamaño: ${compressedContent.length} bytes`);
+    Logger.debug(`Contenido comprimido, tamaño: ${compressedContent.length} bytes`);
 
     // Guardar el contenido comprimido
     if (saveLocally) {
@@ -245,22 +296,21 @@ const processBatch = async (records, type, saveLocally, minuteKey = null) => {
 
     return {
         count: records.length,
-        date: firstDate,
+        date: new Date(firstRecord.created_at), // Corregido: usar la fecha del primer registro
         fileName
     };
 };
 
 /**
- * Agrupa registros por intervalos de 10 minutos
+ * Agrupa registros por hora
  * @param {Object} record - Registro a agrupar
- * @returns {string} Clave del minuto para agrupar
+ * @returns {string} Clave de la hora para agrupar (formato YYYY-MM-DD-HH)
  */
-const getMinuteKey = (record) => {
+const getHourKey = (record) => {
     const createdAt = new Date(record.created_at);
-    // Redondear los minutos al múltiplo de 10 más cercano
-    const minutes = createdAt.getMinutes();
-    const roundedMinutes = Math.floor(minutes / 10) * 10;
-    return `${createdAt.getFullYear()}-${createdAt.getMonth() + 1}-${createdAt.getDate()}-${createdAt.getHours()}-${roundedMinutes}`;
+    const pad = (num) => num.toString().padStart(2, '0');
+    // Clave basada en año, mes, día y hora
+    return `${createdAt.getFullYear()}-${pad(createdAt.getMonth() + 1)}-${pad(createdAt.getDate())}-${pad(createdAt.getHours())}`;
 };
 
 /**
@@ -283,21 +333,23 @@ const saveToS3 = async (content, fileName) => {
         await s3Client.send(command);
         Logger.info(`Archivo guardado en ${BUCKET_NAME}/${fileName}`);
     } catch (error) {
-        Logger.error(`Error al guardar el archivo en S3: ${error}`);
+        Logger.error('Error al guardar el archivo en S3:', error); // Modificado
         throw error;
     }
 };
 
 /**
  * Construye la consulta SQL con filtros de fecha
+ * @param {string} queryNumber - Número de consulta (1, 2, o 3)
  * @param {string} startDate - Fecha de inicio (YYYY-MM-DD)
  * @param {string} endDate - Fecha de fin (YYYY-MM-DD)
  * @param {number} limit - Límite de registros
+ * @param {string} [id] - ID específico para filtrar (opcional)
  * @returns {Object} Objeto con la consulta y los parámetros
  */
-const buildQuery = (queryNumber, startDate, endDate, limit) => {
+const buildQuery = (queryNumber, startDate, endDate, limit, id) => {
     // Consulta base para cada tabla
-    const baseSelect = `
+    let baseSelect = `
         SELECT
             cal.id,
             cal.controller,
@@ -354,7 +406,8 @@ const buildQuery = (queryNumber, startDate, endDate, limit) => {
         ${baseSelect}
         FROM controller_actions_logs cal
         LEFT JOIN accounts acc ON cal.account_id = acc.id
-        WHERE cal.id <= 1040103545
+        WHERE 1=1
+        AND cal.id <= 1040103545
     `;
 
     const params = [];
@@ -381,6 +434,12 @@ const buildQuery = (queryNumber, startDate, endDate, limit) => {
     if (endDate) {
         query += ` AND cal.created_at <= ?`;
         params.push(endDate);
+    }
+
+    // Añadir filtro de ID si se especifica
+    if (id) {
+        query += ` AND cal.id = ?`;
+        params.push(id);
     }
 
     // Añadir límite si se especifica
@@ -456,11 +515,10 @@ const saveToLocalFile = async (content, fileName) => {
         await fs.mkdir(dirPath, { recursive: true });
 
         // Guardar archivo
-        Logger.info(`Guardando archivo local: ${fileName}`);
         await fs.writeFile(fileName, content);
         Logger.info(`Archivo guardado en ${fileName}`);
     } catch (error) {
-        Logger.error(`Error al guardar el archivo local: ${error}`);
+        Logger.error('Error al guardar el archivo local:', error); // Modificado
         throw error;
     }
 };
@@ -468,16 +526,19 @@ const saveToLocalFile = async (content, fileName) => {
 /**
  * Función principal que ejecuta todo el proceso
  * @param {Object} options - Opciones de ejecución
+ * @param {string} options.queryNumber - Número de consulta (1, 2, o 3)
  * @param {string} options.startDate - Fecha de inicio (YYYY-MM-DD)
  * @param {string} options.endDate - Fecha de fin (YYYY-MM-DD)
  * @param {number} options.limit - Límite de registros a procesar
+ * @param {string} [options.id] - ID específico para filtrar (opcional)
  * @param {boolean} options.test - Modo test (genera datos aleatorios)
  * @param {boolean} options.testDb - Modo test-db (usa MySQL pero guarda localmente)
  * @param {number} options.batchSize - Tamaño del lote de registros por archivo (0 para un solo archivo)
  * @returns {Promise<Object>} Resultado de la operación
  */
 const main = async (options = {}) => {
-    const { queryNumber, startDate, endDate, limit, test = false, testDb = false, batchSize = 0} = options;
+    // Desestructurar 'id' de las opciones
+    const { queryNumber, startDate, endDate, limit, id, test = false, testDb = false, batchSize = 0} = options;
 
     // Determinar si se guardarán los archivos localmente
     const saveLocally = test || testDb;
@@ -486,14 +547,18 @@ const main = async (options = {}) => {
     let connection;
     let filesCreated = 0;
     let totalRecords = 0;
+    let overallLastProcessedDate = null; // Para almacenar la fecha del último registro procesado globalmente
+
+    // Helper para formatear la fecha para logs, si no es null
+    const formatOverallDateForLog = () => overallLastProcessedDate ? ` (último registro procesado: ${overallLastProcessedDate})` : '';
 
     try {
         // Generar nombre de archivo base (siempre de tipo 'cal')
         const type = 'cal';
 
         // Si no se especificó un tamaño de lote, usamos un valor predeterminado para evitar problemas de memoria
-        const effectiveBatchSize = batchSize || 0; // 0 significa agrupar por intervalos de 10 minutos
-        Logger.info(`Tamaño de lote efectivo: ${effectiveBatchSize || 'agrupación por intervalos de 10 minutos'}`);
+        const effectiveBatchSize = batchSize || 0; // 0 significa agrupar por hora
+        Logger.info(`Tamaño de lote efectivo: ${effectiveBatchSize || 'agrupación por hora'}`);
 
         if (test) {
             // Modo test: generar datos aleatorios
@@ -505,51 +570,76 @@ const main = async (options = {}) => {
             Logger.info(`Generados ${randomObjects.length} registros aleatorios`);
 
             // Procesar los registros
-            const processedRecords = randomObjects.map(record => processRecord(record, type));
+            const processedRecords = randomObjects.map(record => {
+                const processed = processRecord(record, type);
+                // Actualizar la fecha del último registro procesado si este registro tiene una fecha válida
+                if (processed.created_at) {
+                    overallLastProcessedDate = processed.created_at;
+                }
+                return processed;
+            });
+            Logger.info(`Registros de prueba procesados${formatOverallDateForLog()}`);
 
-            // Si se usa agrupación por minuto
+            // Si se usa agrupación por hora
             if (effectiveBatchSize === 0) {
-                // Agrupar por minuto
-                const recordsByMinute = new Map();
+                // Agrupar por hora
+                const recordsByHour = new Map();
 
-                // Agrupar registros por minuto
+                // Agrupar registros por hora
                 for (const record of processedRecords) {
-                    const minuteKey = getMinuteKey(record);
-                    if (!recordsByMinute.has(minuteKey)) {
-                        recordsByMinute.set(minuteKey, []);
+                    const hourKey = getHourKey(record); // Usar getHourKey
+                    if (!recordsByHour.has(hourKey)) {
+                        recordsByHour.set(hourKey, []);
                     }
-                    recordsByMinute.get(minuteKey).push(record);
+                    recordsByHour.get(hourKey).push(record);
                 }
 
-                // Procesar cada grupo de minutos
-                for (const [minuteKey, minuteRecords] of recordsByMinute.entries()) {
-                    Logger.info(`Procesando lote de ${minuteRecords.length} registros del minuto ${minuteKey}`);
+                // Procesar cada grupo de horas
+                for (const [hourKey, hourRecords] of recordsByHour.entries()) {
+                    // Actualizar overallLastProcessedDate con el último registro de este grupo horario si es necesario
+                    if (hourRecords.length > 0 && hourRecords[hourRecords.length - 1].created_at) {
+                        overallLastProcessedDate = hourRecords[hourRecords.length - 1].created_at;
+                    }
+                    Logger.info(`Procesando lote de ${hourRecords.length} registros de la hora ${hourKey}${formatOverallDateForLog()}`);
 
-                    // Procesar el lote pasando la clave del minuto para mantener consistencia
-                    const result = await processBatch(minuteRecords, type, saveLocally, minuteKey);
+                    // Procesar el lote pasando la clave de la hora para mantener consistencia
+                    const result = await processBatch(hourRecords, type, saveLocally, hourKey); // Pasar hourKey
                     if (result) {
                         filesCreated++;
                         totalRecords += result.count;
+                        // Log de progreso cada 100 ficheros
+                        if (filesCreated > 0 && filesCreated % 100 === 0) {
+                            Logger.info(`Progreso: ${filesCreated} archivos creados, ${totalRecords} registros procesados en total${formatOverallDateForLog()}`);
+                        }
                     }
                 }
             } else {
                 // Usar batchSize
                 for (let i = 0; i < processedRecords.length; i += effectiveBatchSize) {
                     const batch = processedRecords.slice(i, i + effectiveBatchSize);
-                    Logger.info(`Procesando lote de ${batch.length} registros (${i + 1}-${i + batch.length} de ${processedRecords.length})`);
+                    // Actualizar overallLastProcessedDate con el último registro de este batch específico
+                    if (batch.length > 0 && batch[batch.length - 1].created_at) {
+                        overallLastProcessedDate = batch[batch.length - 1].created_at;
+                    }
+                    Logger.info(`Procesando lote de ${batch.length} registros (${i + 1}-${i + batch.length} de ${processedRecords.length})${formatOverallDateForLog()}`);
 
                     // Procesar el lote
                     const result = await processBatch(batch, type, saveLocally);
                     if (result) {
                         filesCreated++;
                         totalRecords += result.count;
+                        // Log de progreso cada 100 ficheros
+                        if (filesCreated > 0 && filesCreated % 100 === 0) {
+                            Logger.info(`Progreso: ${filesCreated} archivos creados, ${totalRecords} registros procesados en total${formatOverallDateForLog()}`);
+                        }
                     }
                 }
             }
         } else {
             // Modo normal o test-db: obtener datos de MySQL
             connection = await connectToMySQL();
-            const { query, params } = buildQuery(queryNumber, startDate, endDate, limit);
+            // Pasar 'id' a buildQuery
+            const { query, params } = buildQuery(queryNumber, startDate, endDate, limit, id);
 
             if (testDb) {
                 Logger.info(`Modo TEST-DB: Obteniendo datos de MySQL y guardando localmente`);
@@ -565,10 +655,10 @@ const main = async (options = {}) => {
             // Crear una promesa para manejar la finalización del stream
             await new Promise((resolve, reject) => {
                 // Estructuras para almacenar registros temporalmente
-                const recordsByMinute = new Map();
+                const recordsByHour = new Map(); // Cambiado de recordsByMinute
                 const records = [];
                 let count = 0;
-                let currentMinuteKey = null;
+                let currentHourKey = null; // Cambiado de currentMinuteKey
 
                 // Crear un stream de la consulta
                 const queryStream = connection.query(query, params);
@@ -577,60 +667,77 @@ const main = async (options = {}) => {
                 queryStream.on('result', async (row) => {
                     try {
                         count++;
-                        if (count % 1000 === 0) {
-                            Logger.info(`Procesados ${count} registros`);
-                        }
-
                         // Procesar el registro
                         const processedRecord = processRecord(row, type);
+                        // Actualizar la fecha del último registro procesado
+                        if (processedRecord.created_at) {
+                            overallLastProcessedDate = processedRecord.created_at;
+                        }
 
-                        // Si se usa agrupación por intervalos de 10 minutos
+                        if (count % 10000 === 0) {
+                            Logger.info(`Procesados ${count} registros${formatOverallDateForLog()}`);
+                        }
+
+                        // Si se usa agrupación por hora
                         if (effectiveBatchSize === 0) {
-                            const minuteKey = getMinuteKey(processedRecord);
+                            const hourKey = getHourKey(processedRecord); // Usar getHourKey
 
-                            // Si es un nuevo intervalo de 10 minutos y ya tenemos registros del intervalo anterior, procesarlos
-                            if (currentMinuteKey && minuteKey !== currentMinuteKey && recordsByMinute.has(currentMinuteKey)) {
+                            // Si es una nueva hora y ya tenemos registros de la hora anterior, procesarlos
+                            if (currentHourKey && hourKey !== currentHourKey && recordsByHour.has(currentHourKey)) {
                                 // Pausar el stream mientras procesamos el lote
                                 connection.pause();
 
-                                const minuteRecords = recordsByMinute.get(currentMinuteKey);
-                                Logger.info(`Procesando lote de ${minuteRecords.length} registros del intervalo ${currentMinuteKey}`);
+                                const hourRecords = recordsByHour.get(currentHourKey);
+                                // Actualizar overallLastProcessedDate con el último registro de este grupo horario
+                                if (hourRecords.length > 0 && hourRecords[hourRecords.length - 1].created_at) {
+                                    overallLastProcessedDate = hourRecords[hourRecords.length - 1].created_at;
+                                }
+                                Logger.info(`Procesando lote de ${hourRecords.length} registros de la hora ${currentHourKey}${formatOverallDateForLog()}`);
 
                                 try {
-                                    // Procesar el lote pasando la clave del minuto para mantener consistencia
-                                    const result = await processBatch(minuteRecords, type, saveLocally, currentMinuteKey);
+                                    // Procesar el lote pasando la clave de la hora para mantener consistencia
+                                    const result = await processBatch(hourRecords, type, saveLocally, currentHourKey); // Pasar currentHourKey
                                     if (result) {
                                         filesCreated++;
                                         totalRecords += result.count;
+                                        // Log de progreso cada 100 ficheros
+                                        if (filesCreated > 0 && filesCreated % 100 === 0) {
+                                            Logger.info(`Progreso: ${filesCreated} archivos creados, ${totalRecords} registros procesados en total${formatOverallDateForLog()}`);
+                                        }
                                     }
 
-                                    // Limpiar el intervalo procesado para liberar memoria
-                                    recordsByMinute.delete(currentMinuteKey);
+                                    // Limpiar la hora procesada para liberar memoria
+                                    recordsByHour.delete(currentHourKey);
 
                                     // Reanudar el stream
                                     connection.resume();
                                 } catch (error) {
-                                    Logger.error(`Error al procesar lote: ${error}`);
+                                    Logger.error('Error al procesar lote:', error); // Modificado
                                     reject(error);
                                 }
                             }
 
-                            // Guardar el registro en el mapa de minutos
-                            if (!recordsByMinute.has(minuteKey)) {
-                                recordsByMinute.set(minuteKey, []);
+                            // Guardar el registro en el mapa de horas
+                            if (!recordsByHour.has(hourKey)) {
+                                recordsByHour.set(hourKey, []);
                             }
-                            recordsByMinute.get(minuteKey).push(processedRecord);
-                            currentMinuteKey = minuteKey;
+                            recordsByHour.get(hourKey).push(processedRecord);
+                            currentHourKey = hourKey;
                         } else {
                             // Usar batchSize
                             records.push(processedRecord);
+                            // Actualizar overallLastProcessedDate con el último registro de este batch si es necesario
+                            if (records.length > 0 && records[records.length-1].created_at) {
+                                overallLastProcessedDate = records[records.length-1].created_at;
+                            }
+
 
                             // Si se alcanzó el tamaño del lote, procesarlo
                             if (records.length >= effectiveBatchSize) {
                                 // Pausar el stream mientras procesamos el lote
                                 connection.pause();
 
-                                Logger.info(`Procesando lote de ${records.length} registros`);
+                                Logger.info(`Procesando lote de ${records.length} registros${formatOverallDateForLog()}`);
 
                                 try {
                                     // Procesar el lote
@@ -638,6 +745,10 @@ const main = async (options = {}) => {
                                     if (result) {
                                         filesCreated++;
                                         totalRecords += result.count;
+                                        // Log de progreso cada 100 ficheros
+                                        if (filesCreated > 0 && filesCreated % 100 === 0) {
+                                            Logger.info(`Progreso: ${filesCreated} archivos creados, ${totalRecords} registros procesados en total${formatOverallDateForLog()}`);
+                                        }
                                     }
 
                                     // Limpiar el array para el siguiente lote
@@ -646,58 +757,73 @@ const main = async (options = {}) => {
                                     // Reanudar el stream
                                     connection.resume();
                                 } catch (error) {
-                                    Logger.error(`Error al procesar lote: ${error}`);
+                                    Logger.error('Error al procesar lote:', error); // Modificado
                                     reject(error);
                                 }
                             }
                         }
                     } catch (error) {
-                        Logger.error(`Error al procesar registro: ${error}`);
+                        Logger.error('Error al procesar registro:', error); // Modificado
                         reject(error);
                     }
                 });
 
                 // Evento para errores
                 queryStream.on('error', (error) => {
-                    Logger.error(`Error en el stream de la consulta: ${error}`);
+                    Logger.error('Error en el stream de la consulta:', error); // Modificado
                     reject(error);
                 });
 
                 // Evento para el fin del stream
                 queryStream.on('end', async () => {
-                    Logger.info(`Stream de consulta finalizado. Procesados ${count} registros en total.`);
+                    Logger.info(`Stream de consulta finalizado. Procesados ${count} registros en total${formatOverallDateForLog()}.`);
 
                     try {
                         // Procesar los registros restantes
                         if (effectiveBatchSize === 0) {
-                            // Procesar los registros restantes agrupados por intervalos de 10 minutos
-                            for (const [minuteKey, minuteRecords] of recordsByMinute.entries()) {
-                                if (minuteRecords.length > 0) {
-                                    Logger.info(`Procesando lote final de ${minuteRecords.length} registros del intervalo ${minuteKey}`);
+                            // Procesar los registros restantes agrupados por hora
+                            for (const [hourKey, hourRecords] of recordsByHour.entries()) { // Cambiado a recordsByHour y hourKey
+                                if (hourRecords.length > 0) {
+                                    // Actualizar overallLastProcessedDate con el último registro de este grupo horario
+                                    if (hourRecords.length > 0 && hourRecords[hourRecords.length - 1].created_at) {
+                                        overallLastProcessedDate = hourRecords[hourRecords.length - 1].created_at;
+                                    }
+                                    Logger.info(`Procesando lote final de ${hourRecords.length} registros de la hora ${hourKey}${formatOverallDateForLog()}`);
 
-                                    // Procesar el lote pasando la clave del minuto para mantener consistencia
-                                    const result = await processBatch(minuteRecords, type, saveLocally, minuteKey);
+                                    // Procesar el lote pasando la clave de la hora para mantener consistencia
+                                    const result = await processBatch(hourRecords, type, saveLocally, hourKey); // Pasar hourKey
                                     if (result) {
                                         filesCreated++;
                                         totalRecords += result.count;
+                                        // Log de progreso cada 100 ficheros (aunque es menos probable aquí, por consistencia)
+                                        if (filesCreated > 0 && filesCreated % 100 === 0) {
+                                            Logger.info(`Progreso: ${filesCreated} archivos creados, ${totalRecords} registros procesados en total${formatOverallDateForLog()}`);
+                                        }
                                     }
                                 }
                             }
                         } else if (records.length > 0) {
                             // Procesar los registros restantes cuando se usa batchSize
-                            Logger.info(`Procesando lote final de ${records.length} registros`);
+                             if (records.length > 0 && records[records.length-1].created_at) {
+                                overallLastProcessedDate = records[records.length-1].created_at;
+                            }
+                            Logger.info(`Procesando lote final de ${records.length} registros${formatOverallDateForLog()}`);
 
                             // Procesar el lote
                             const result = await processBatch(records, type, saveLocally);
                             if (result) {
                                 filesCreated++;
                                 totalRecords += result.count;
+                                 // Log de progreso cada 100 ficheros
+                                if (filesCreated > 0 && filesCreated % 100 === 0) {
+                                    Logger.info(`Progreso: ${filesCreated} archivos creados, ${totalRecords} registros procesados en total${formatOverallDateForLog()}`);
+                                }
                             }
                         }
 
                         resolve();
                     } catch (error) {
-                        Logger.error(`Error al procesar lotes finales: ${error}`);
+                        Logger.error('Error al procesar lotes finales:', error); // Modificado
                         reject(error);
                     }
                 });
@@ -719,11 +845,11 @@ const main = async (options = {}) => {
 
         let successMessage;
         if (test) {
-            successMessage = `Proceso en modo TEST completado exitosamente. Se generaron ${totalRecords} registros en ${filesCreated} archivos.`;
+            successMessage = `Proceso en modo TEST completado exitosamente. Se generaron ${totalRecords} registros en ${filesCreated} archivos.${formatOverallDateForLog()}`;
         } else if (testDb) {
-            successMessage = `Proceso en modo TEST-DB completado exitosamente. Se obtuvieron ${totalRecords} registros de MySQL y se guardaron en ${filesCreated} archivos locales.`;
+            successMessage = `Proceso en modo TEST-DB completado exitosamente. Se obtuvieron ${totalRecords} registros de MySQL y se guardaron en ${filesCreated} archivos locales.${formatOverallDateForLog()}`;
         } else {
-            successMessage = `Proceso completado exitosamente. Se procesaron ${totalRecords} registros en ${filesCreated} archivos.`;
+            successMessage = `Proceso completado exitosamente. Se procesaron ${totalRecords} registros en ${filesCreated} archivos.${formatOverallDateForLog()}`;
         }
 
         Logger.info(successMessage);
@@ -733,7 +859,7 @@ const main = async (options = {}) => {
             body: successMessage
         };
     } catch (error) {
-        Logger.error(`Error en el proceso principal: ${error}`);
+        Logger.error('Error en el proceso principal:', error); // Modificado
 
         // Cerrar la conexión a MySQL si está abierta
         if (connection) {
@@ -741,7 +867,7 @@ const main = async (options = {}) => {
                 await connection.end();
                 Logger.info('Conexión a MySQL cerrada después de error');
             } catch (closeError) {
-                Logger.error(`Error al cerrar la conexión a MySQL: ${closeError}`);
+                Logger.error('Error al cerrar la conexión a MySQL:', closeError); // Modificado
             }
         }
 
@@ -778,6 +904,8 @@ const runFromCommandLine = async () => {
                 options.limit = parseInt(arg.substring(8));
             } else if (arg.startsWith('--batch-size=')) {
                 options.batchSize = parseInt(arg.substring(13));
+            } else if (arg.startsWith('--id=')) { // Añadido el parseo para --id
+                options.id = arg.substring(5);
             } else {
                 Logger.warn(`Opción desconocida: ${arg}`);
             }
@@ -790,7 +918,7 @@ const runFromCommandLine = async () => {
         // No necesitamos registrar el mensaje de nuevo, ya se registró en la función main
         process.exit(0);
     } catch (error) {
-        Logger.error(`Error: ${error.message}`);
+        Logger.error('Error en runFromCommandLine:', error); // Modificado para pasar el objeto error completo
         process.exit(1);
     }
 };
