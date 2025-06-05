@@ -516,7 +516,7 @@ const saveToLocalFile = async (content, fileName) => {
 
         // Guardar archivo
         await fs.writeFile(fileName, content);
-        Logger.info(`Archivo guardado en ${fileName}`);
+        Logger.debug(`Archivo guardado en ${fileName}`);
     } catch (error) {
         Logger.error('Error al guardar el archivo local:', error); // Modificado
         throw error;
@@ -551,6 +551,13 @@ const main = async (options = {}) => {
 
     // Helper para formatear la fecha para logs, si no es null
     const formatOverallDateForLog = () => overallLastProcessedDate ? ` (último registro procesado: ${overallLastProcessedDate})` : '';
+
+    // Helper para logging de progreso cada 100 archivos - evita duplicación de código
+    const logProgressIfNeeded = () => {
+        if (filesCreated > 0 && filesCreated % 100 === 0) {
+            Logger.info(`Progreso: ${filesCreated} archivos creados, ${totalRecords} registros procesados en total${formatOverallDateForLog()}`);
+        }
+    };
 
     try {
         // Generar nombre de archivo base (siempre de tipo 'cal')
@@ -600,17 +607,14 @@ const main = async (options = {}) => {
                     if (hourRecords.length > 0 && hourRecords[hourRecords.length - 1].created_at) {
                         overallLastProcessedDate = hourRecords[hourRecords.length - 1].created_at;
                     }
-                    Logger.info(`Procesando lote de ${hourRecords.length} registros de la hora ${hourKey}${formatOverallDateForLog()}`);
+                    Logger.debug(`Procesando lote de ${hourRecords.length} registros de la hora ${hourKey}${formatOverallDateForLog()}`);
 
                     // Procesar el lote pasando la clave de la hora para mantener consistencia
                     const result = await processBatch(hourRecords, type, saveLocally, hourKey); // Pasar hourKey
                     if (result) {
                         filesCreated++;
                         totalRecords += result.count;
-                        // Log de progreso cada 100 ficheros
-                        if (filesCreated > 0 && filesCreated % 100 === 0) {
-                            Logger.info(`Progreso: ${filesCreated} archivos creados, ${totalRecords} registros procesados en total${formatOverallDateForLog()}`);
-                        }
+                        logProgressIfNeeded();
                     }
                 }
             } else {
@@ -621,17 +625,14 @@ const main = async (options = {}) => {
                     if (batch.length > 0 && batch[batch.length - 1].created_at) {
                         overallLastProcessedDate = batch[batch.length - 1].created_at;
                     }
-                    Logger.info(`Procesando lote de ${batch.length} registros (${i + 1}-${i + batch.length} de ${processedRecords.length})${formatOverallDateForLog()}`);
+                    Logger.debug(`Procesando lote de ${batch.length} registros (${i + 1}-${i + batch.length} de ${processedRecords.length})${formatOverallDateForLog()}`);
 
                     // Procesar el lote
                     const result = await processBatch(batch, type, saveLocally);
                     if (result) {
                         filesCreated++;
                         totalRecords += result.count;
-                        // Log de progreso cada 100 ficheros
-                        if (filesCreated > 0 && filesCreated % 100 === 0) {
-                            Logger.info(`Progreso: ${filesCreated} archivos creados, ${totalRecords} registros procesados en total${formatOverallDateForLog()}`);
-                        }
+                        logProgressIfNeeded();
                     }
                 }
             }
@@ -692,7 +693,7 @@ const main = async (options = {}) => {
                                 if (hourRecords.length > 0 && hourRecords[hourRecords.length - 1].created_at) {
                                     overallLastProcessedDate = hourRecords[hourRecords.length - 1].created_at;
                                 }
-                                Logger.info(`Procesando lote de ${hourRecords.length} registros de la hora ${currentHourKey}${formatOverallDateForLog()}`);
+                                Logger.debug(`Procesando lote de ${hourRecords.length} registros de la hora ${currentHourKey}${formatOverallDateForLog()}`);
 
                                 try {
                                     // Procesar el lote pasando la clave de la hora para mantener consistencia
@@ -700,10 +701,7 @@ const main = async (options = {}) => {
                                     if (result) {
                                         filesCreated++;
                                         totalRecords += result.count;
-                                        // Log de progreso cada 100 ficheros
-                                        if (filesCreated > 0 && filesCreated % 100 === 0) {
-                                            Logger.info(`Progreso: ${filesCreated} archivos creados, ${totalRecords} registros procesados en total${formatOverallDateForLog()}`);
-                                        }
+                                        logProgressIfNeeded();
                                     }
 
                                     // Limpiar la hora procesada para liberar memoria
@@ -745,10 +743,7 @@ const main = async (options = {}) => {
                                     if (result) {
                                         filesCreated++;
                                         totalRecords += result.count;
-                                        // Log de progreso cada 100 ficheros
-                                        if (filesCreated > 0 && filesCreated % 100 === 0) {
-                                            Logger.info(`Progreso: ${filesCreated} archivos creados, ${totalRecords} registros procesados en total${formatOverallDateForLog()}`);
-                                        }
+                                        logProgressIfNeeded();
                                     }
 
                                     // Limpiar el array para el siguiente lote
@@ -795,10 +790,7 @@ const main = async (options = {}) => {
                                     if (result) {
                                         filesCreated++;
                                         totalRecords += result.count;
-                                        // Log de progreso cada 100 ficheros (aunque es menos probable aquí, por consistencia)
-                                        if (filesCreated > 0 && filesCreated % 100 === 0) {
-                                            Logger.info(`Progreso: ${filesCreated} archivos creados, ${totalRecords} registros procesados en total${formatOverallDateForLog()}`);
-                                        }
+                                        logProgressIfNeeded();
                                     }
                                 }
                             }
@@ -814,10 +806,7 @@ const main = async (options = {}) => {
                             if (result) {
                                 filesCreated++;
                                 totalRecords += result.count;
-                                 // Log de progreso cada 100 ficheros
-                                if (filesCreated > 0 && filesCreated % 100 === 0) {
-                                    Logger.info(`Progreso: ${filesCreated} archivos creados, ${totalRecords} registros procesados en total${formatOverallDateForLog()}`);
-                                }
+                                logProgressIfNeeded();
                             }
                         }
 
