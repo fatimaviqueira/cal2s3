@@ -328,10 +328,10 @@ const saveToS3 = async (content, fileName) => {
     };
 
     try {
-        Logger.info(`Iniciando envío a S3 (bucket: ${BUCKET_NAME}, archivo: ${fileName})...`);
+        Logger.debug(`Iniciando envío a S3 (bucket: ${BUCKET_NAME}, archivo: ${fileName})...`);
         const command = new PutObjectCommand(params);
         await s3Client.send(command);
-        Logger.info(`Archivo guardado en ${BUCKET_NAME}/${fileName}`);
+        Logger.debug(`Archivo guardado en ${BUCKET_NAME}/${fileName}`);
     } catch (error) {
         Logger.error('Error al guardar el archivo en S3:', error); // Modificado
         throw error;
@@ -674,7 +674,7 @@ const main = async (options = {}) => {
                             overallLastProcessedDate = processedRecord.created_at;
                         }
 
-                        if (count % 10000 === 0) {
+                        if (count % 100000 === 0) {
                             Logger.info(`Procesados ${count} registros${formatOverallDateForLog()}`);
                         }
 
@@ -737,7 +737,7 @@ const main = async (options = {}) => {
                                 // Pausar el stream mientras procesamos el lote
                                 connection.pause();
 
-                                Logger.info(`Procesando lote de ${records.length} registros${formatOverallDateForLog()}`);
+                                Logger.debug(`Procesando lote de ${records.length} registros${formatOverallDateForLog()}`);
 
                                 try {
                                     // Procesar el lote
