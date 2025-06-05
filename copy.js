@@ -1,9 +1,9 @@
 /**
  * copy.js
- * 
+ *
  * Este script extrae datos de una tabla MySQL, los formatea,
  * los comprime y los guarda en carpetas en S3 según la fecha.
- * 
+ *
  * Funcionamiento:
  * 1. Conecta a MySQL y ejecuta una consulta para obtener los datos
  * 2. Procesa los resultados agrupándolos por intervalos de 10 minutos o por lotes de tamaño fijo
@@ -22,6 +22,16 @@ import { fileURLToPath } from 'url';
 // Cargamos las variables de entorno
 dotenv.config();
 
+console.log('Cargando variables de entorno...');
+console.log(`Entorno: ${process.env.ENVIRONMENT}`);
+console.log(`Bucket: ${process.env.BUCKET_NAME}`);
+console.log(`Región: ${process.env.AWS_REGION}`);
+console.log(`MySQL Host: ${process.env.MYSQL_HOST}`);
+console.log(`MySQL Port: ${process.env.MYSQL_PORT}`);
+console.log(`MySQL User: ${process.env.MYSQL_USER}`);
+console.log(`MySQL Database: ${process.env.MYSQL_DATABASE}`);
+console.log(`Log Level: ${process.env.LOG_LEVEL}`);
+
 // Configuración del entorno
 const ENVIRONMENT = process.env.ENVIRONMENT || 'development';
 const BUCKET_NAME = process.env.BUCKET_NAME || `lam-${ENVIRONMENT}-teixo`;
@@ -31,6 +41,7 @@ const LOG_LEVEL = process.env.LOG_LEVEL || 'info';
 // Configuración de MySQL
 const MYSQL_CONFIG = {
     host: process.env.MYSQL_HOST || 'localhost',
+    port: process.env.MYSQL_PORT || '3306',
     user: process.env.MYSQL_USER || 'root',
     password: process.env.MYSQL_PASSWORD || '',
     database: process.env.MYSQL_DATABASE || 'database_name',
@@ -54,25 +65,25 @@ const LogLevels = {
 
 const Logger = {
     currentLevel: LogLevels[LOG_LEVEL.toUpperCase()] || LogLevels.INFO,
-    
+
     debug: function(message) {
         if (this.currentLevel <= LogLevels.DEBUG) {
             console.log(`[DEBUG] ${message}`);
         }
     },
-    
+
     info: function(message) {
         if (this.currentLevel <= LogLevels.INFO) {
             console.log(`[INFO] ${message}`);
         }
     },
-    
+
     warn: function(message) {
         if (this.currentLevel <= LogLevels.WARN) {
             console.warn(`[WARN] ${message}`);
         }
     },
-    
+
     error: function(message) {
         if (this.currentLevel <= LogLevels.ERROR) {
             console.error(`[ERROR] ${message}`);
@@ -127,24 +138,13 @@ const getTimestampFilename = (type, date) => {
 };
 
 /**
- * Genera un nombre de archivo basado en la marca de tiempo actual y un tipo
- * @param {string} type - Tipo de datos (usado como prefijo en el nombre del archivo)
- * @returns {string} Ruta completa del archivo incluyendo carpetas organizadas por fecha
- */
-const getCurrentTimestampFilename = (type) => {
-    // Obtener la fecha y hora actuales
-    const now = new Date();
-    return getTimestampFilename(type, now);
-};
-
-/**
  * Formatea una fecha para que sea compatible con el formato esperado
  * @param {string} dateString - Fecha en formato string
  * @returns {string} Fecha formateada
  */
 const formatDate = (dateString) => {
     if (!dateString) return null;
-    
+
     // Crear un objeto Date a partir de la cadena de fecha original
     const date = new Date(dateString);
     // Descomponer la fecha y hora en sus componentes
@@ -178,7 +178,7 @@ const connectToMySQL = () => {
 const processRecord = (record, type) => {
     // Añadir campos adicionales (excepto s3file, que se añadirá más tarde)
     record.uuid = record.uuid || uuidv4();
-    
+
     // Formatear fechas
     if (record.created_at) {
         record.created_at = formatDate(record.created_at);
@@ -186,12 +186,12 @@ const processRecord = (record, type) => {
     if (record.updated_at) {
         record.updated_at = formatDate(record.updated_at);
     }
-    
+
     // Convertir ajax_call a booleano si es un valor numérico
     if (record.ajax_call !== undefined) {
         record.ajax_call = Boolean(record.ajax_call);
     }
-    
+
     return record;
 };
 
@@ -205,11 +205,11 @@ const processRecord = (record, type) => {
  */
 const processBatch = async (records, type, saveLocally, minuteKey = null) => {
     if (records.length === 0) return null;
-    
+
     // Obtener la fecha del primer registro para el nombre del archivo
     const firstRecord = records[0];
     const firstDate = new Date(firstRecord.created_at);
-    
+
     // Generar el nombre del archivo basado en el intervalo de 10 minutos
     // Si se proporciona minuteKey, usarla para generar un nombre consistente para el mismo intervalo de 10 minutos
     let fileName;
@@ -222,27 +222,27 @@ const processBatch = async (records, type, saveLocally, minuteKey = null) => {
     } else {
         fileName = `${type}/${getTimestampFilename(type, firstDate)}`;
     }
-    
+
     // Añadir el campo s3file a todos los registros con la ruta completa
     const fullPath = `${BUCKET_NAME}/${fileName}`;
     for (const record of records) {
         record.s3file = fullPath;
     }
-    
+
     // Convertir los registros acumulados a JSON
     const jsonContent = JSON.stringify(records, null, 2);
-    
+
     // Comprimir el contenido
     const compressedContent = zlib.gzipSync(jsonContent, { level: 9 });
     Logger.info(`Contenido comprimido, tamaño: ${compressedContent.length} bytes`);
-    
+
     // Guardar el contenido comprimido
     if (saveLocally) {
         await saveToLocalFile(compressedContent, fileName);
     } else {
         await saveToS3(compressedContent, fileName);
     }
-    
+
     return {
         count: records.length,
         date: firstDate,
@@ -295,10 +295,10 @@ const saveToS3 = async (content, fileName) => {
  * @param {number} limit - Límite de registros
  * @returns {Object} Objeto con la consulta y los parámetros
  */
-const buildQuery = (startDate, endDate, limit) => {
+const buildQuery = (queryNumber, startDate, endDate, limit) => {
     // Consulta base para cada tabla
     const baseSelect = `
-        SELECT 
+        SELECT
             cal.id,
             cal.controller,
             cal.action,
@@ -315,15 +315,24 @@ const buildQuery = (startDate, endDate, limit) => {
             cal.app_version,
             cal.infered_object_id,
             cal.user_id,
-            cal.request_trace_id,
-            cal.error_message,
-            cal.server_instance_name,
             acc.client_code as account_client_code,
             acc.client_name as account_client_name,
             acc.client_type as account_client_type,
             acc.description as account_description
     `;
-    
+
+    if (queryNumber === '3') {
+        baseSelect += `,
+            cal.request_trace_id,
+            cal.error_message,
+            cal.server_instance_name
+        `;
+    } else if (queryNumber === '2') {
+        baseSelect += `,
+            cal.server_instance_name
+        `;
+    }
+
     // Construir la consulta para controller_actions_logs_old
     let query1 = `
         ${baseSelect}
@@ -331,7 +340,7 @@ const buildQuery = (startDate, endDate, limit) => {
         LEFT JOIN accounts acc ON cal.account_id = acc.id
         WHERE 1=1
     `;
-    
+
     // Construir la consulta para controller_actions_logs_old2
     let query2 = `
         ${baseSelect}
@@ -339,39 +348,47 @@ const buildQuery = (startDate, endDate, limit) => {
         LEFT JOIN accounts acc ON cal.account_id = acc.id
         WHERE 1=1
     `;
-    
+
     // Construir la consulta para controller_actions_logs (solo hasta el ID 1040103545)
     let query3 = `
         ${baseSelect}
         FROM controller_actions_logs cal
         LEFT JOIN accounts acc ON cal.account_id = acc.id
-        -- WHERE cal.id <= 1040103545
-        WHERE cal.id = 1094730020
+        WHERE cal.id <= 1040103545
     `;
-    
+
     const params = [];
-    
+
+    // Dependiendo de queryNumber, seleccionamos la consulta adecuada
+    let query;
+    if (queryNumber === '1') {
+        query = query1;
+    } else if (queryNumber === '2') {
+        query = query2;
+    } else if (queryNumber === '3') {
+        query = query3;
+    } else {
+        throw new Error(`Número de consulta inválido: ${queryNumber}. Debe ser 1, 2 o 3.`);
+    }
+
     // Añadir filtro de fecha de inicio si se especifica
     if (startDate) {
-        query3 += ` AND cal.created_at >= ?`;
+        query += ` AND cal.created_at >= ?`;
         params.push(startDate);
     }
-    
+
     // Añadir filtro de fecha de fin si se especifica
     if (endDate) {
-        query3 += ` AND cal.created_at <= ?`;
+        query += ` AND cal.created_at <= ?`;
         params.push(endDate);
     }
-    
-    // Combinar las consultas con UNION ALL
-    let query = query3; // UNION ALL (${query2}) UNION ALL (${query3})`;
-    
+
     // Añadir límite si se especifica
     if (limit) {
         query += ` LIMIT ?`;
         params.push(limit);
     }
-    
+
     return { query, params };
 };
 
@@ -382,7 +399,7 @@ const buildQuery = (startDate, endDate, limit) => {
 const generateRandomObject = () => {
     const now = new Date();
     const id = Math.floor(Math.random() * 10000);
-    
+
     return {
         id,
         controller: ['UsersController', 'ProductsController', 'OrdersController'][Math.floor(Math.random() * 3)],
@@ -432,12 +449,12 @@ const generateRandomObjects = (count) => {
 const saveToLocalFile = async (content, fileName) => {
     const fs = await import('fs/promises');
     const path = await import('path');
-    
+
     try {
         // Crear directorio si no existe
         const dirPath = path.dirname(fileName);
         await fs.mkdir(dirPath, { recursive: true });
-        
+
         // Guardar archivo
         Logger.info(`Guardando archivo local: ${fileName}`);
         await fs.writeFile(fileName, content);
@@ -459,42 +476,42 @@ const saveToLocalFile = async (content, fileName) => {
  * @param {number} options.batchSize - Tamaño del lote de registros por archivo (0 para un solo archivo)
  * @returns {Promise<Object>} Resultado de la operación
  */
-export const main = async (options = {}) => {
-    const { startDate, endDate, limit, test = false, testDb = false, batchSize = 0 } = options;
-    
+const main = async (options = {}) => {
+    const { queryNumber, startDate, endDate, limit, test = false, testDb = false, batchSize = 0} = options;
+
     // Determinar si se guardarán los archivos localmente
     const saveLocally = test || testDb;
-    
+
     Logger.info(`Iniciando proceso con opciones: ${JSON.stringify(options)}`);
     let connection;
     let filesCreated = 0;
     let totalRecords = 0;
-    
+
     try {
         // Generar nombre de archivo base (siempre de tipo 'cal')
         const type = 'cal';
-        
+
         // Si no se especificó un tamaño de lote, usamos un valor predeterminado para evitar problemas de memoria
         const effectiveBatchSize = batchSize || 0; // 0 significa agrupar por intervalos de 10 minutos
         Logger.info(`Tamaño de lote efectivo: ${effectiveBatchSize || 'agrupación por intervalos de 10 minutos'}`);
-        
+
         if (test) {
             // Modo test: generar datos aleatorios
             const testLimit = limit || 100;
             Logger.info(`Modo TEST: Generando ${testLimit} registros aleatorios`);
-            
+
             // Generar datos aleatorios
             const randomObjects = generateRandomObjects(testLimit);
             Logger.info(`Generados ${randomObjects.length} registros aleatorios`);
-            
+
             // Procesar los registros
             const processedRecords = randomObjects.map(record => processRecord(record, type));
-            
+
             // Si se usa agrupación por minuto
             if (effectiveBatchSize === 0) {
                 // Agrupar por minuto
                 const recordsByMinute = new Map();
-                
+
                 // Agrupar registros por minuto
                 for (const record of processedRecords) {
                     const minuteKey = getMinuteKey(record);
@@ -503,11 +520,11 @@ export const main = async (options = {}) => {
                     }
                     recordsByMinute.get(minuteKey).push(record);
                 }
-                
+
                 // Procesar cada grupo de minutos
                 for (const [minuteKey, minuteRecords] of recordsByMinute.entries()) {
                     Logger.info(`Procesando lote de ${minuteRecords.length} registros del minuto ${minuteKey}`);
-                    
+
                     // Procesar el lote pasando la clave del minuto para mantener consistencia
                     const result = await processBatch(minuteRecords, type, saveLocally, minuteKey);
                     if (result) {
@@ -520,7 +537,7 @@ export const main = async (options = {}) => {
                 for (let i = 0; i < processedRecords.length; i += effectiveBatchSize) {
                     const batch = processedRecords.slice(i, i + effectiveBatchSize);
                     Logger.info(`Procesando lote de ${batch.length} registros (${i + 1}-${i + batch.length} de ${processedRecords.length})`);
-                    
+
                     // Procesar el lote
                     const result = await processBatch(batch, type, saveLocally);
                     if (result) {
@@ -532,19 +549,19 @@ export const main = async (options = {}) => {
         } else {
             // Modo normal o test-db: obtener datos de MySQL
             connection = await connectToMySQL();
-            const { query, params } = buildQuery(startDate, endDate, limit);
-            
+            const { query, params } = buildQuery(queryNumber, startDate, endDate, limit);
+
             if (testDb) {
                 Logger.info(`Modo TEST-DB: Obteniendo datos de MySQL y guardando localmente`);
             }
-            
+
             // Ejecutar la consulta y procesar los resultados
             Logger.info(`Ejecutando consulta: ${query}`);
             Logger.debug(`Parámetros de la consulta: ${JSON.stringify(params)}`);
-            
+
             // Ejecutar la consulta como stream para procesar los resultados a medida que llegan
             Logger.info(`Ejecutando consulta como stream para procesar registros a medida que llegan`);
-            
+
             // Crear una promesa para manejar la finalización del stream
             await new Promise((resolve, reject) => {
                 // Estructuras para almacenar registros temporalmente
@@ -552,10 +569,10 @@ export const main = async (options = {}) => {
                 const records = [];
                 let count = 0;
                 let currentMinuteKey = null;
-                
+
                 // Crear un stream de la consulta
                 const queryStream = connection.query(query, params);
-                
+
                 // Evento para cada fila
                 queryStream.on('result', async (row) => {
                     try {
@@ -563,22 +580,22 @@ export const main = async (options = {}) => {
                         if (count % 1000 === 0) {
                             Logger.info(`Procesados ${count} registros`);
                         }
-                        
+
                         // Procesar el registro
                         const processedRecord = processRecord(row, type);
-                        
+
                         // Si se usa agrupación por intervalos de 10 minutos
                         if (effectiveBatchSize === 0) {
                             const minuteKey = getMinuteKey(processedRecord);
-                            
+
                             // Si es un nuevo intervalo de 10 minutos y ya tenemos registros del intervalo anterior, procesarlos
                             if (currentMinuteKey && minuteKey !== currentMinuteKey && recordsByMinute.has(currentMinuteKey)) {
                                 // Pausar el stream mientras procesamos el lote
                                 connection.pause();
-                                
+
                                 const minuteRecords = recordsByMinute.get(currentMinuteKey);
                                 Logger.info(`Procesando lote de ${minuteRecords.length} registros del intervalo ${currentMinuteKey}`);
-                                
+
                                 try {
                                     // Procesar el lote pasando la clave del minuto para mantener consistencia
                                     const result = await processBatch(minuteRecords, type, saveLocally, currentMinuteKey);
@@ -586,10 +603,10 @@ export const main = async (options = {}) => {
                                         filesCreated++;
                                         totalRecords += result.count;
                                     }
-                                    
+
                                     // Limpiar el intervalo procesado para liberar memoria
                                     recordsByMinute.delete(currentMinuteKey);
-                                    
+
                                     // Reanudar el stream
                                     connection.resume();
                                 } catch (error) {
@@ -597,7 +614,7 @@ export const main = async (options = {}) => {
                                     reject(error);
                                 }
                             }
-                            
+
                             // Guardar el registro en el mapa de minutos
                             if (!recordsByMinute.has(minuteKey)) {
                                 recordsByMinute.set(minuteKey, []);
@@ -607,14 +624,14 @@ export const main = async (options = {}) => {
                         } else {
                             // Usar batchSize
                             records.push(processedRecord);
-                            
+
                             // Si se alcanzó el tamaño del lote, procesarlo
                             if (records.length >= effectiveBatchSize) {
                                 // Pausar el stream mientras procesamos el lote
                                 connection.pause();
-                                
+
                                 Logger.info(`Procesando lote de ${records.length} registros`);
-                                
+
                                 try {
                                     // Procesar el lote
                                     const result = await processBatch(records, type, saveLocally);
@@ -622,10 +639,10 @@ export const main = async (options = {}) => {
                                         filesCreated++;
                                         totalRecords += result.count;
                                     }
-                                    
+
                                     // Limpiar el array para el siguiente lote
                                     records.length = 0;
-                                    
+
                                     // Reanudar el stream
                                     connection.resume();
                                 } catch (error) {
@@ -639,17 +656,17 @@ export const main = async (options = {}) => {
                         reject(error);
                     }
                 });
-                
+
                 // Evento para errores
                 queryStream.on('error', (error) => {
                     Logger.error(`Error en el stream de la consulta: ${error}`);
                     reject(error);
                 });
-                
+
                 // Evento para el fin del stream
                 queryStream.on('end', async () => {
                     Logger.info(`Stream de consulta finalizado. Procesados ${count} registros en total.`);
-                    
+
                     try {
                         // Procesar los registros restantes
                         if (effectiveBatchSize === 0) {
@@ -657,7 +674,7 @@ export const main = async (options = {}) => {
                             for (const [minuteKey, minuteRecords] of recordsByMinute.entries()) {
                                 if (minuteRecords.length > 0) {
                                     Logger.info(`Procesando lote final de ${minuteRecords.length} registros del intervalo ${minuteKey}`);
-                                    
+
                                     // Procesar el lote pasando la clave del minuto para mantener consistencia
                                     const result = await processBatch(minuteRecords, type, saveLocally, minuteKey);
                                     if (result) {
@@ -669,7 +686,7 @@ export const main = async (options = {}) => {
                         } else if (records.length > 0) {
                             // Procesar los registros restantes cuando se usa batchSize
                             Logger.info(`Procesando lote final de ${records.length} registros`);
-                            
+
                             // Procesar el lote
                             const result = await processBatch(records, type, saveLocally);
                             if (result) {
@@ -677,7 +694,7 @@ export const main = async (options = {}) => {
                                 totalRecords += result.count;
                             }
                         }
-                        
+
                         resolve();
                     } catch (error) {
                         Logger.error(`Error al procesar lotes finales: ${error}`);
@@ -685,12 +702,12 @@ export const main = async (options = {}) => {
                     }
                 });
             });
-            
+
             // Cerrar la conexión a MySQL
             await connection.end();
             Logger.info('Conexión a MySQL cerrada');
         }
-        
+
         // Verificar si se procesaron datos
         if (totalRecords === 0) {
             Logger.warn('No se encontraron datos para procesar');
@@ -699,7 +716,7 @@ export const main = async (options = {}) => {
                 body: 'No se encontraron datos para procesar'
             };
         }
-        
+
         let successMessage;
         if (test) {
             successMessage = `Proceso en modo TEST completado exitosamente. Se generaron ${totalRecords} registros en ${filesCreated} archivos.`;
@@ -708,16 +725,16 @@ export const main = async (options = {}) => {
         } else {
             successMessage = `Proceso completado exitosamente. Se procesaron ${totalRecords} registros en ${filesCreated} archivos.`;
         }
-        
+
         Logger.info(successMessage);
-        
+
         return {
             statusCode: 200,
             body: successMessage
         };
     } catch (error) {
         Logger.error(`Error en el proceso principal: ${error}`);
-        
+
         // Cerrar la conexión a MySQL si está abierta
         if (connection) {
             try {
@@ -727,7 +744,7 @@ export const main = async (options = {}) => {
                 Logger.error(`Error al cerrar la conexión a MySQL: ${closeError}`);
             }
         }
-        
+
         return {
             statusCode: 500,
             body: `Error en el proceso: ${error.message}`
@@ -742,36 +759,32 @@ const runFromCommandLine = async () => {
     try {
         // Obtener argumentos de la línea de comandos
         const options = {};
-        
+
         // Procesar argumentos
         for (let i = 2; i < process.argv.length; i++) {
             const arg = process.argv[i];
-            
+
             if (arg === '--test') {
                 options.test = true;
+            } else if (arg.startsWith('--query=')) {
+                options.queryNumber = arg.substring(8);
             } else if (arg === '--test-db') {
                 options.testDb = true;
             } else if (arg.startsWith('--start=')) {
                 options.startDate = arg.substring(8);
             } else if (arg.startsWith('--end=')) {
                 options.endDate = arg.substring(6);
-            } else if (arg === '--start' && i + 1 < process.argv.length) {
-                options.startDate = process.argv[++i];
-            } else if (arg === '--end' && i + 1 < process.argv.length) {
-                options.endDate = process.argv[++i];
             } else if (arg.startsWith('--limit=')) {
                 options.limit = parseInt(arg.substring(8));
-            } else if (arg === '--limit' && i + 1 < process.argv.length) {
-                options.limit = parseInt(process.argv[++i]);
             } else if (arg.startsWith('--batch-size=')) {
                 options.batchSize = parseInt(arg.substring(13));
-            } else if (arg === '--batch-size' && i + 1 < process.argv.length) {
-                options.batchSize = parseInt(process.argv[++i]);
+            } else {
+                Logger.warn(`Opción desconocida: ${arg}`);
             }
         }
-        
+
         Logger.info(`Ejecutando con opciones: ${JSON.stringify(options)}`);
-        
+
         // Ejecutar la función principal
         const result = await main(options);
         // No necesitamos registrar el mensaje de nuevo, ya se registró en la función main
